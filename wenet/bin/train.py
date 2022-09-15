@@ -34,7 +34,7 @@ from wenet.utils.checkpoint import (load_checkpoint, save_checkpoint,
                                     load_trained_modules)
 from wenet.utils.executor import Executor
 from wenet.utils.file_utils import read_symbol_table, read_non_lang_symbols
-from wenet.utils.scheduler import WarmupLR
+from wenet.utils.scheduler import WarmupLR, Eden, Eve
 from wenet.utils.config import override_config
 
 def get_args():
@@ -248,8 +248,12 @@ def main():
         device = torch.device('cuda' if use_cuda else 'cpu')
         model = model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), **configs['optim_conf'])
-    scheduler = WarmupLR(optimizer, **configs['scheduler_conf'])
+    # optimizer = optim.Adam(model.parameters(), **configs['optim_conf'])
+    # scheduler = WarmupLR(optimizer, **configs['scheduler_conf'])
+    optimizer = Eve(model.parameters(), **configs['optim_conf'])
+    scheduler = Eden(optimizer, **configs['scheduler_conf'])
+
+
     final_epoch = None
     configs['rank'] = args.rank
     configs['is_distributed'] = distributed
@@ -260,7 +264,6 @@ def main():
 
     # Start training loop
     executor.step = step
-    scheduler.set_step(step)
     # used for pytorch amp mixed precision training
     scaler = None
     if args.use_amp:
@@ -268,6 +271,7 @@ def main():
 
     for epoch in range(start_epoch, num_epochs):
         train_dataset.set_epoch(epoch)
+        scheduler.step_epoch(epoch)
         configs['epoch'] = epoch
         lr = optimizer.param_groups[0]['lr']
         logging.info('Epoch {} TRAIN info lr {}'.format(epoch, lr))

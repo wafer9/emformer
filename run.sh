@@ -23,7 +23,7 @@ num_nodes=1
 # on the second machine, and so on.
 node_rank=0
 # data
-data=/data/joe/audio/aishell_set/
+data=/data1/wangzhou/data/aishell_set/
 data_url=www.openslr.org/resources/33
 
 nj=16
@@ -46,7 +46,7 @@ train_set=train
 train_config=conf/train_emformer.yaml
 cmvn=true
 dir=exp/emformer
-checkpoint=${dir}/107.pt
+checkpoint=
 
 # use average_checkpoint will get better result
 average_checkpoint=true
@@ -147,7 +147,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
       --ddp.world_size $world_size \
       --ddp.rank $rank \
       --ddp.dist_backend $dist_backend \
-      --num_workers 30 \
+      --num_workers 10 \
       $cmvn_opts \
       --pin_memory
   } &

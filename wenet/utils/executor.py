@@ -25,6 +25,7 @@ class Executor:
         accum_grad = args.get('accum_grad', 1)
         is_distributed = args.get('is_distributed', True)
         use_amp = args.get('use_amp', False)
+        model_warm_step = 3000.0
         logging.info('using accumulate grad, new batch size is {} times'
                      ' larger than before'.format(accum_grad))
         if use_amp:
@@ -63,7 +64,7 @@ class Executor:
                     # https://pytorch.org/docs/stable/notes/amp_examples.html
                     with torch.cuda.amp.autocast(scaler is not None):
                         loss, loss_att, loss_ctc = model(
-                            feats, feats_lengths, target, target_lengths)
+                            feats, feats_lengths, target, target_lengths, self.step/model_warm_step)
                         loss = loss / accum_grad
                     if use_amp:
                         scaler.scale(loss).backward()
@@ -92,7 +93,8 @@ class Executor:
                         if torch.isfinite(grad_norm):
                             optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()
+                    # scheduler.step()
+                    scheduler.step_batch(batch_idx)
                     self.step += 1
                 if batch_idx % log_interval == 0:
                     lr = optimizer.param_groups[0]['lr']

@@ -51,6 +51,7 @@ class StreamASRModel(torch.nn.Module):
         speech_lengths: torch.Tensor,
         text: torch.Tensor,
         text_lengths: torch.Tensor,
+        warmup: float = 1.0,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Frontend + Encoder + Decoder + Calc loss
@@ -66,7 +67,7 @@ class StreamASRModel(torch.nn.Module):
         assert (speech.shape[0] == speech_lengths.shape[0] == text.shape[0] ==
                 text_lengths.shape[0]), (speech.shape, speech_lengths.shape,
                                          text.shape, text_lengths.shape)
-        encoder_chunk_out, encoder_out_lens = self.encoder(speech, speech_lengths, warmup=1.0)
+        encoder_chunk_out, encoder_out_lens = self.encoder(speech, speech_lengths, warmup=warmup)
 
         encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_chunk_out.size(1)).unsqueeze(1) 
 
