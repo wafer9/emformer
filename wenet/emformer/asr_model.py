@@ -88,6 +88,7 @@ class StreamASRModel(torch.nn.Module):
         speech: torch.Tensor,
         speech_lengths: torch.Tensor,
         device: torch.device,
+        params: Dict,
     ) -> List[List[int]]:
         """ Apply CTC greedy search
 
@@ -98,14 +99,10 @@ class StreamASRModel(torch.nn.Module):
             List[List[int]]: best path result
         """
         assert speech.shape[0] == speech_lengths.shape[0] == 1
-        params = {'memory_size':32, 'encoder_dim': 256, 'left_context_length': 32, \
-                    'subsampling_factor':4, 'right_context_length':8, 'num_encoder_layers':12,
-                    'cnn_module_kernel': 31, 'chunk_length':32}
-
-        speech_lengths += params['left_context_length']
+        speech_lengths += params['right_context_length']
         speech = torch.nn.functional.pad(
             speech,
-            pad=(0, 0, 0, params['left_context_length']),
+            pad=(0, 0, 0, params['right_context_length']),
             value=LOG_EPS,
         )
         encoder_chunk_out, encoder_out_lens = self.encoder(x=speech, x_lens=speech_lengths)

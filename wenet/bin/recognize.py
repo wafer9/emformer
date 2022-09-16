@@ -195,7 +195,7 @@ def main():
                     simulate_streaming=args.simulate_streaming)
                 hyps = [hyp.tolist() for hyp in hyps]
             elif args.mode == 'ctc_greedy_search':
-                hyps = model.streaming_ctc_greedy_search(
+                hyps = model.ctc_greedy_search(
                     feats,
                     feats_lengths,
                     device=device,
