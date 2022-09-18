@@ -23,7 +23,7 @@ num_nodes=1
 # on the second machine, and so on.
 node_rank=0
 # data
-data=/data1/wangzhou/data/aishell_set/
+data=/data/joe/data/aishell_set/
 data_url=www.openslr.org/resources/33
 
 nj=16
@@ -43,9 +43,9 @@ train_set=train
 # 4. conf/train_unified_transformer.yaml: Unified dynamic chunk transformer
 # 5. conf/train_u2++_conformer.yaml: U2++ conformer
 # 6. conf/train_u2++_transformer.yaml: U2++ transformer
-train_config=conf/train_emformer.yaml
+train_config=conf/train_emformer_rnnt.yaml
 cmvn=true
-dir=exp/emformer
+dir=exp/emformer_rnnt
 checkpoint=
 
 # use average_checkpoint will get better result
@@ -114,8 +114,9 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
   mkdir -p $dir
   # You have to rm `INIT_FILE` manually when you resume or restart a
   # multi-machine training.
-  INIT_FILE=$dir/ddp_init
+  INIT_FILE=${dir}/ddp_init
   init_method=file://$(readlink -f $INIT_FILE)
+  # init_method=tcp://10.106.128.51:23456
   echo "$0: init method is $init_method"
   num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
   # Use "nccl" if it works, otherwise use "gloo"
@@ -147,7 +148,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
       --ddp.world_size $world_size \
       --ddp.rank $rank \
       --ddp.dist_backend $dist_backend \
-      --num_workers 10 \
+      --num_workers 20 \
       $cmvn_opts \
       --pin_memory
   } &

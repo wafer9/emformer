@@ -11,8 +11,12 @@ from wenet.utils.common import IGNORE_ID, LOG_EPS, add_sos_eos, log_add
 from wenet.utils.mask import make_pad_mask
 from wenet.bin.stream import Stream, stack_states, unstack_states
 from torch.nn.utils.rnn import pad_sequence
-from wenet.utils.common import remove_duplicates_and_blank
+from wenet.utils.common import remove_duplicates_and_blank, prepare_loss_inputs, initializer
 import torch.nn.functional as F
+from wenet.transducer.joint_network import JointNetwork
+from wenet.transducer.predictor import Predictor
+from warprnnt_pytorch import RNNTLoss
+
 
 class StreamASRModel(torch.nn.Module):
     """CTC-attention hybrid Encoder-Decoder model"""
@@ -22,6 +26,8 @@ class StreamASRModel(torch.nn.Module):
         encoder: Emformer,
         decoder: TransformerDecoder,
         ctc: CTC,
+        predictor: Predictor,
+        joint_network: JointNetwork,
         ctc_weight: float = 0.5,
         ignore_id: int = IGNORE_ID,
         lsm_weight: float = 0.0,
@@ -31,6 +37,7 @@ class StreamASRModel(torch.nn.Module):
         # note that eos is the same as sos (equivalent ID)
         self.sos = vocab_size - 1
         self.eos = vocab_size - 1
+        self.blank_id = 0
         self.vocab_size = vocab_size
         self.ignore_id = ignore_id
         self.ctc_weight = ctc_weight
@@ -38,11 +45,19 @@ class StreamASRModel(torch.nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.ctc = ctc
+
         self.criterion_att = LabelSmoothingLoss(
             size=vocab_size,
             padding_idx=ignore_id,
             smoothing=lsm_weight,
             normalize_length=length_normalized_loss,
+        )
+        self.predictor = predictor
+        self.joint_network = joint_network
+        self.transducer_loss = RNNTLoss(
+            blank=self.blank_id,
+            reduction="mean",
+            fastemit_lambda=0.0,
         )
 
     def forward(
@@ -69,17 +84,30 @@ class StreamASRModel(torch.nn.Module):
                                          text.shape, text_lengths.shape)
         encoder_chunk_out, encoder_out_lens = self.encoder(speech, speech_lengths, warmup=warmup)
 
-        encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_chunk_out.size(1)).unsqueeze(1) 
+        # ctc
+        loss_ctc = self.ctc(encoder_chunk_out, encoder_out_lens, text, text_lengths)
 
+        # attention
+        encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_chunk_out.size(1)).unsqueeze(1) 
         ys_in_pad, ys_out_pad = add_sos_eos(text, self.sos, self.eos, self.ignore_id)
         ys_in_lens = text_lengths + 1
         decoder_out, _ = self.decoder(encoder_chunk_out, encoder_mask, ys_in_pad, ys_in_lens)
-
-        loss_ctc = self.ctc(encoder_chunk_out, encoder_out_lens, text, text_lengths)
         loss_att = self.criterion_att(decoder_out, ys_out_pad)
-        loss = loss_ctc * self.ctc_weight + loss_att
 
-        return loss, loss_att, loss_ctc
+        # transducer
+        predict_ys_in_pad, target, target_len = prepare_loss_inputs(text, encoder_mask)
+        self.predictor.set_device(encoder_chunk_out.device)
+        predictor_out = self.predictor(predict_ys_in_pad)
+        h_enc = encoder_chunk_out.unsqueeze(2)
+        h_dec = predictor_out.unsqueeze(1)
+        joint_out = self.joint_network(h_enc, h_dec)
+        target = target.to(dtype=torch.int32)
+        encoder_out_lens = encoder_out_lens.to(dtype=torch.int32)
+        loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
+
+        loss = loss_ctc * self.ctc_weight + loss_att + loss_trans
+
+        return loss, loss_att, loss_ctc, loss_trans
 
 
 
@@ -350,12 +378,18 @@ def init_stream_asr_model(configs):
     decoder = TransformerDecoder(vocab_size, d_model,
                                      **configs['decoder_conf'])
     ctc = CTC(vocab_size, encoder_output_size=d_model)
+    
+    predictor = Predictor(odim=vocab_size, **configs['decoder_lstm_conf'])
+    joint_network = JointNetwork(vocab_size, d_model, d_model, d_model)
 
     model = StreamASRModel(
         vocab_size=vocab_size,
         encoder=encoder,
         decoder=decoder,
         ctc=ctc,
+        predictor=predictor,
+        joint_network=joint_network,
         **configs['model_conf']
     )
+    model = initializer(model)
     return model

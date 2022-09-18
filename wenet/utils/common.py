@@ -137,6 +137,81 @@ class HypothesisList(object):
         return ", ".join(s)
 
 
+def prepare_loss_inputs(ys_pad: torch.Tensor, hlens: torch.Tensor,
+                        blank_id: int = 0, ignore_id: int = -1,
+            ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,]:
+    """Prepare tensors for transducer loss computation.
+    Args:
+        ys_pad (torch.Tensor): batch of padded target sequences (B, Lmax)
+        hlens (torch.Tensor): batch of hidden sequence lengthts (B)
+                              or batch of masks (B, 1, Tmax)
+        blank_id (int): index of blank label
+        ignore_id (int): index of initial padding
+    Returns:
+        ys_in_pad (torch.Tensor): batch of padded target sequences + blank (B, Lmax + 1)
+        target (torch.Tensor): batch of padded target sequences (B, Lmax)
+        pred_len (torch.Tensor): batch of hidden sequence lengths (B)
+        target_len (torch.Tensor): batch of output sequence lengths (B)
+    """
+    device = ys_pad.device
+
+    ys = [y[y != ignore_id] for y in ys_pad]
+
+    blank = torch.tensor([blank_id],
+                        dtype=torch.int64,
+                        requires_grad=False,
+                        device=ys_pad.device)
+
+    ys_in = [torch.cat([blank, y], dim=0) for y in ys]
+    ys_in_pad = pad_list(ys_in, blank_id)
+
+    target = pad_list(ys, blank_id)
+    target_len = torch.tensor([y.size(0) for y in ys],
+                                dtype=torch.int32,
+                                requires_grad=False,
+                                device=ys_pad.device)
+
+
+    return ys_in_pad, target, target_len
+
+
+def set_forget_bias_to_one(bias):
+    """Initialize a bias vector in the forget gate with one."""
+    n = bias.size(0)
+    start, end = n // 4, n // 2
+    bias.data[start:end].fill_(1.0)
+
+
+def initializer(model: torch.nn.Module):
+    """Initialize Transducer model.
+    Args:
+        model: Transducer model.
+        args: Namespace containing model options.
+    """
+    for name, p in model.named_parameters():
+        if any(x in name for x in ["predictor.", "joint_network.", "ctc."]):
+            if p.dim() == 1:
+                # bias
+                p.data.zero_()
+            elif p.dim() == 2:
+                # linear weight
+                n = p.size(1)
+                stdv = 1.0 / math.sqrt(n)
+                p.data.normal_(0, stdv)
+            elif p.dim() in (3, 4):
+                # conv weight
+                n = p.size(1)
+                for k in p.size()[2:]:
+                    n *= k
+                    stdv = 1.0 / math.sqrt(n)
+                    p.data.normal_(0, stdv)
+
+    model.predictor.embed.weight.data.normal_(0, 1)
+    for i in range(model.predictor.dlayers):
+        set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_ih_l0"))
+        set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_hh_l0"))
+    return model
+
 def pad_list(xs: List[torch.Tensor], pad_value: int):
     """Perform padding for the list of tensors.
 
