@@ -102,7 +102,6 @@ class StreamASRModel(torch.nn.Module):
 
         # transducer
         predict_ys_in_pad, target, target_len = prepare_loss_inputs(text, encoder_mask)
-        self.predictor.set_device(encoder_chunk_out.device)
         predictor_out = self.predictor(predict_ys_in_pad)
         h_enc = encoder_chunk_out.unsqueeze(2)
         h_dec = predictor_out.unsqueeze(1)
@@ -406,20 +405,23 @@ class StreamASRModel(torch.nn.Module):
 def init_stream_asr_model(configs):
     input_dim = configs['input_dim']
     vocab_size = configs['output_dim']
-    d_model = configs['encoder_conf']['d_model']
+    encoder_dim = configs['encoder_conf']['d_model']
     decoder_type = configs.get('decoder', 'bitransformer')
     
     encoder = Emformer(num_features=input_dim, **configs['encoder_conf'])
     if decoder_type == 'transformer':
-        decoder = TransformerDecoder(vocab_size, d_model, **configs['decoder_conf'])
+        decoder = TransformerDecoder(vocab_size, encoder_dim, **configs['decoder_conf'])
     else:
         assert 0.0 < configs['model_conf']['reverse_weight'] < 1.0
         assert configs['decoder_conf']['r_num_blocks'] > 0
-        decoder = BiTransformerDecoder(vocab_size, d_model, **configs['decoder_conf'])
-    ctc = CTC(vocab_size, encoder_output_size=d_model)
+        decoder = BiTransformerDecoder(vocab_size, encoder_dim, **configs['decoder_conf'])
+    ctc = CTC(vocab_size, encoder_output_size=encoder_dim)
     
-    predictor = Predictor(odim=vocab_size, **configs['decoder_lstm_conf'])
-    joint_network = JointNetwork(vocab_size, d_model, d_model, d_model)
+    predictor_dim = configs['predictor_conf']['predictor_dim']
+    context_size = configs['predictor_conf']['context_size']
+    joint_dim = configs['joint_dim']
+    predictor = Predictor(vocab_size, predictor_dim, context_size)
+    joint_network = JointNetwork(vocab_size, encoder_dim, predictor_dim, joint_dim)
 
     model = StreamASRModel(
         vocab_size=vocab_size,

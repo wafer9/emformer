@@ -206,10 +206,10 @@ def initializer(model: torch.nn.Module):
                     stdv = 1.0 / math.sqrt(n)
                     p.data.normal_(0, stdv)
 
-    model.predictor.embed.weight.data.normal_(0, 1)
-    for i in range(model.predictor.dlayers):
-        set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_ih_l0"))
-        set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_hh_l0"))
+    # model.predictor.embed.weight.data.normal_(0, 1)
+    # for i in range(model.predictor.dlayers):
+    #     set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_ih_l0"))
+    #     set_forget_bias_to_one(getattr(model.predictor.decoder[i], "bias_hh_l0"))
     return model
 
 def pad_list(xs: List[torch.Tensor], pad_value: int):

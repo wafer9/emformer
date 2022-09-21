@@ -279,6 +279,16 @@ def main():
                        writer, configs, scaler)
         total_loss, num_seen_utts = executor.cv(model, cv_data_loader, device,
                                                 configs)
+        # if args.world_size > 1:
+        #     # all_reduce expected a sequence parameter, so we use [num_seen_utts].
+        #     num_seen_utts = torch.Tensor([num_seen_utts]).to(device)
+        #     # the default operator in all_reduce function is sum.
+        #     dist.all_reduce(num_seen_utts)
+        #     total_loss = torch.Tensor([total_loss]).to(device)
+        #     dist.all_reduce(total_loss)
+        #     cv_loss = total_loss[0] / num_seen_utts[0]
+        #     cv_loss = cv_loss.item()
+        # else:
         cv_loss = total_loss / num_seen_utts
 
         logging.info('Epoch {} CV info cv_loss {}'.format(epoch, cv_loss))
