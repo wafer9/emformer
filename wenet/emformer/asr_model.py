@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from wenet.transducer.joint_network import JointNetwork
 from wenet.transducer.predictor import Predictor
 from warprnnt_pytorch import RNNTLoss
-
+from torchaudio.functional import rnnt_loss
 
 class StreamASRModel(torch.nn.Module):
     """CTC-attention hybrid Encoder-Decoder model"""
@@ -26,7 +26,7 @@ class StreamASRModel(torch.nn.Module):
         self,
         vocab_size: int,
         encoder: Emformer,
-        decoder: TransformerDecoder,
+        # decoder: TransformerDecoder,
         ctc: CTC,
         predictor: Predictor,
         joint_network: JointNetwork,
@@ -47,7 +47,7 @@ class StreamASRModel(torch.nn.Module):
         self.reverse_weight = reverse_weight
 
         self.encoder = encoder
-        self.decoder = decoder
+        # self.decoder = decoder
         self.ctc = ctc
 
         self.criterion_att = LabelSmoothingLoss(
@@ -90,15 +90,15 @@ class StreamASRModel(torch.nn.Module):
         encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_chunk_out.size(1)).unsqueeze(1) 
 
         # ctc
-        loss_ctc = self.ctc(encoder_chunk_out, encoder_out_lens, text, text_lengths)
+        # loss_ctc = self.ctc(encoder_chunk_out, encoder_out_lens, text, text_lengths)
 
         
         # 2a. Attention-decoder branch
-        if self.ctc_weight != 1.0:
-            loss_att = self._calc_att_loss(encoder_chunk_out, encoder_mask,
-                                                    text, text_lengths)
-        else:
-            loss_att = None
+        # if self.ctc_weight != 1.0:
+        #     loss_att = self._calc_att_loss(encoder_chunk_out, encoder_mask,
+        #                                             text, text_lengths)
+        # else:
+        #     loss_att = None
 
         # transducer
         predict_ys_in_pad, target, target_len = prepare_loss_inputs(text, encoder_mask)
@@ -108,11 +108,14 @@ class StreamASRModel(torch.nn.Module):
         joint_out = self.joint_network(h_enc, h_dec)
         target = target.to(dtype=torch.int32)
         encoder_out_lens = encoder_out_lens.to(dtype=torch.int32)
-        loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
+        loss_trans = rnnt_loss(joint_out, target, encoder_out_lens, target_len,
+                                blank=self.blank_id, reduction="mean")
+        # loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
 
-        loss = loss_ctc * self.ctc_weight + loss_att + loss_trans
 
-        return loss, loss_att, loss_ctc, loss_trans
+        loss = loss_trans
+
+        return loss, None, None, loss_trans
 
     def _calc_att_loss(
         self,
@@ -426,7 +429,6 @@ def init_stream_asr_model(configs):
     model = StreamASRModel(
         vocab_size=vocab_size,
         encoder=encoder,
-        decoder=decoder,
         ctc=ctc,
         predictor=predictor,
         joint_network=joint_network,

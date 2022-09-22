@@ -77,8 +77,8 @@ class Executor:
                         writer.add_scalar('train_loss', loss, self.step)
                     # Use mixed precision training
                     if use_amp:
-                        scaler.unscale_(optimizer)
-                        grad_norm = clip_grad_norm_(model.parameters(), clip)
+                        # scaler.unscale_(optimizer)
+                        # grad_norm = clip_grad_norm_(model.parameters(), clip)
                         # Must invoke scaler.update() if unscale_() is used in
                         # the iteration to avoid the following error:
                         #   RuntimeError: unscale_() has already been called
