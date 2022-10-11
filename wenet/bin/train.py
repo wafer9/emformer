@@ -29,7 +29,6 @@ from torch.utils.data import DataLoader
 from wenet.dataset.dataset import Dataset
 from wenet.emformer.asr_model import init_stream_asr_model
 
-from wenet.transformer.asr_model import init_asr_model
 from wenet.utils.checkpoint import (load_checkpoint, save_checkpoint,
                                     load_trained_modules)
 from wenet.utils.executor import Executor
@@ -194,10 +193,8 @@ def main():
             fout.write(data)
 
     # Init asr model from configs
-    if configs['stream']:
-        model = init_stream_asr_model(configs)
-    else:
-        model = init_asr_model(configs)
+    model = init_stream_asr_model(configs)
+
     print(model)
     num_params = sum(p.numel() for p in model.parameters())
     print('the number of model params: {}'.format(num_params))
@@ -234,7 +231,7 @@ def main():
         # cuda model is required for nn.parallel.DistributedDataParallel
         model.cuda()
         model = torch.nn.parallel.DistributedDataParallel(
-            model, find_unused_parameters=True)
+            model, find_unused_parameters=False)
         device = torch.device("cuda")
         if args.fp16_grad_sync:
             from torch.distributed.algorithms.ddp_comm_hooks import (

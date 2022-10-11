@@ -1603,7 +1603,7 @@ class Emformer(EncoderInterface):
         self,
         num_features: int,
         chunk_length: int,
-        subsampling_factor: int = 4,
+        subsampling_factor: int = 6,
         d_model: int = 256,
         nhead: int = 4,
         dim_feedforward: int = 2048,
@@ -1622,7 +1622,7 @@ class Emformer(EncoderInterface):
         self.subsampling_factor = subsampling_factor
         self.right_context_length = right_context_length
         self.chunk_length = chunk_length
-        if subsampling_factor != 4:
+        if subsampling_factor != 6:
             raise NotImplementedError("Support only 'subsampling_factor=4'.")
         if chunk_length % subsampling_factor != 0:
             raise NotImplementedError(
@@ -1837,6 +1837,7 @@ class Conv2dSubsampling(nn.Module):
                 in_channels=1,
                 out_channels=layer1_channels,
                 kernel_size=3,
+                padding=1,
             ),
             ActivationBalancer(channel_dim=1),
             DoubleSwish(),
@@ -1851,14 +1852,14 @@ class Conv2dSubsampling(nn.Module):
             ScaledConv2d(
                 in_channels=layer2_channels,
                 out_channels=layer3_channels,
-                kernel_size=3,
-                stride=2,
+                kernel_size=5,
+                stride=3,
             ),
             ActivationBalancer(channel_dim=1),
             DoubleSwish(),
         )
         self.out = ScaledLinear(
-            layer3_channels * (((in_channels - 1) // 2 - 1) // 2), out_channels
+            layer3_channels * (((in_channels - 1) // 2 - 2) // 3), out_channels
         )
         # set learn_eps=False because out_norm is preceded by `out`, and `out`
         # itself has learned scale, so the extra degree of freedom is not
@@ -1879,10 +1880,6 @@ class Conv2dSubsampling(nn.Module):
         Returns:
           Return a tensor of shape (N, ((T-1)//2 - 1)//2, odim)
         """
-        # x = x.transpose(1, 2) # (b, n, 1) -> (b, 1, n)
-        # x = self.sinc(x)      # (b, 80, t)
-        # x = x.transpose(1, 2) # (b, t=n, f=80)
-
         # On entry, x is (N, T, idim)
         x = x.unsqueeze(1)  # (N, T, idim) -> (N, 1, T, idim) i.e., (N, C, H, W)
         x = self.conv(x)
@@ -1893,7 +1890,6 @@ class Conv2dSubsampling(nn.Module):
         x = self.out_norm(x)
         x = self.out_balancer(x)
 
-        # x_lens = x_lens - 1 * (251 - 1) - 1
-        # x_lens = torch.div(x_lens, 160, rounding_mode='floor') + 1
-        x_lens = (((x_lens - 1) >> 1) - 1) >> 1
+        x_lens = torch.div(x_lens - 1, 2, rounding_mode='floor')
+        x_lens = torch.div(x_lens - 2, 3, rounding_mode='floor')
         return x, x_lens

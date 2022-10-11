@@ -3,8 +3,8 @@
 stream: true
 encoder: emformer
 encoder_conf:
-    chunk_length: 32
-    subsampling_factor: 4 
+    chunk_length: 48
+    subsampling_factor: 6
     d_model: 256    # dimension of attention
     nhead: 4
     dim_feedforward: 2048  # the number of units of position-wise feed forward
@@ -12,22 +12,10 @@ encoder_conf:
     dropout: 0.1
     layer_dropout: 0.075
     cnn_module_kernel: 31
-    left_context_length: 32
-    right_context_length: 8
+    left_context_length: 48
+    right_context_length: 12
     memory_size: 32
 
-
-# decoder related
-decoder: bitransformer
-decoder_conf:
-    attention_heads: 4
-    linear_units: 2048
-    num_blocks: 3
-    r_num_blocks: 3
-    dropout_rate: 0.1
-    positional_dropout_rate: 0.1
-    self_attention_dropout_rate: 0.1
-    src_attention_dropout_rate: 0.1
 
 predictor_conf:
     predictor_dim: 512
@@ -37,9 +25,6 @@ joint_dim: 512
 # hybrid CTC/attention
 model_conf:
     ctc_weight: 0.3
-    lsm_weight: 0.1     # label smoothing option
-    length_normalized_loss: false
-    reverse_weight: 0.3
 
 dataset_conf:
     filter_conf:
@@ -70,7 +55,7 @@ dataset_conf:
     batch_conf:
         batch_type: 'dynamic' # static or dynamic
         # batch_size: 8
-        max_frames_in_batch: 8000
+        max_frames_in_batch: 10000
 
 
 grad_clip: 5

@@ -28,7 +28,6 @@ class StreamASRModel(torch.nn.Module):
         joint_network: JointNetwork,
         ctc_weight: float = 0.5,
         ignore_id: int = IGNORE_ID,
-        reverse_weight: float = 0.0,
     ):
         super().__init__()
         # note that eos is the same as sos (equivalent ID)
@@ -38,7 +37,6 @@ class StreamASRModel(torch.nn.Module):
         self.vocab_size = vocab_size
         self.ignore_id = ignore_id
         self.ctc_weight = ctc_weight
-        self.reverse_weight = reverse_weight
 
         self.encoder = encoder
         self.ctc = ctc
@@ -89,7 +87,7 @@ class StreamASRModel(torch.nn.Module):
         encoder_out_lens = encoder_out_lens.to(dtype=torch.int32)
         loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
 
-        loss = loss_ctc * self.ctc_weight * loss_trans * (1 - self.ctc_weight)
+        loss = loss_ctc * self.ctc_weight + loss_trans * (1 - self.ctc_weight)
 
         return loss, None, loss_ctc, loss_trans
 
