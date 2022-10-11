@@ -1,7 +1,7 @@
 """Unility functions for Transformer."""
 
 import math
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Union, Any
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -12,18 +12,14 @@ LOG_EPS = math.log(1e-10)
 
 @dataclass
 class Hypothesis:
-    # The predicted tokens so far.
-    # Newly predicted tokens are appended to `ys`.
-    ys: List[int]
+    """Hypothesis class for beam search algorithms."""
 
-    # The log prob of ys.
-    # It contains only one entry.
-    log_prob: torch.Tensor
-
-    @property
-    def key(self) -> str:
-        """Return a string representation of self.ys"""
-        return "_".join(map(str, self.ys))
+    score: float
+    yseq: List[int]
+    dec_state: Union[List[List[torch.Tensor]], List[torch.Tensor]]
+    y: List[torch.tensor] = None
+    lm_state: Union[Dict[str, Any], List[Any]] = None
+    lm_scores: torch.Tensor = None
 
 
 

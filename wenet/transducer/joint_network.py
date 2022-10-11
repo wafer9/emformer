@@ -20,13 +20,16 @@ class JointNetwork(torch.nn.Module):
     ):
         """Joint network initializer."""
         super().__init__()
-        self.lin_enc = torch.nn.Linear(encoder_output_size, joint_space_size)
-        self.lin_dec = torch.nn.Linear(decoder_output_size, joint_space_size, bias=False)
-        self.lin_out = torch.nn.Linear(joint_space_size, vocab_size)
+        self.encoder_proj = torch.nn.Linear(encoder_output_size, joint_space_size)
+        self.decoder_proj = torch.nn.Linear(decoder_output_size, joint_space_size, bias=False)
+        self.output_linear = torch.nn.Linear(joint_space_size, vocab_size)
 
-        self.joint_activation = torch.nn.Tanh()
-
-    def forward(self, h_enc: torch.Tensor, h_dec: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        encoder_out: torch.Tensor, 
+        decoder_out: torch.Tensor,
+        project_input: bool = True,
+    ) -> torch.Tensor:
         """Joint computation of z.
 
         Args:
@@ -37,8 +40,11 @@ class JointNetwork(torch.nn.Module):
             z: Output (B, T, U, vocab_size)
 
         """
-        z = self.joint_activation(self.lin_enc(h_enc) + self.lin_dec(h_dec))
-        z = self.lin_out(z)
+        if project_input:
+            logit = self.encoder_proj(encoder_out) + self.decoder_proj(decoder_out)
+        else:
+            logit = encoder_out + decoder_out
+        logit = self.output_linear(torch.tanh(logit))
 
-        return z
+        return logit
 

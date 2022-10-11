@@ -4,21 +4,18 @@ from typing import List, Optional, Tuple, Dict
 import torch
 
 from wenet.transformer.ctc import CTC
-from wenet.emformer.encoder import Emformer
-from wenet.emformer.decoder import TransformerDecoder
-from wenet.transformer.decoder import BiTransformerDecoder
-from wenet.transformer.label_smoothing_loss import LabelSmoothingLoss
+from wenet.emformer.emformer import Emformer
+
 from wenet.utils.common import IGNORE_ID, LOG_EPS, add_sos_eos, log_add
 from wenet.utils.mask import make_pad_mask
 from wenet.bin.stream import Stream, stack_states, unstack_states
 from torch.nn.utils.rnn import pad_sequence
-from wenet.utils.common import (remove_duplicates_and_blank, prepare_loss_inputs, 
+from wenet.utils.common import (remove_duplicates_and_blank, prepare_loss_inputs,
                                 initializer, reverse_pad_list)
 import torch.nn.functional as F
 from wenet.transducer.joint_network import JointNetwork
 from wenet.transducer.predictor import Predictor
 from warprnnt_pytorch import RNNTLoss
-from torchaudio.functional import rnnt_loss
 
 class StreamASRModel(torch.nn.Module):
     """CTC-attention hybrid Encoder-Decoder model"""
@@ -26,15 +23,12 @@ class StreamASRModel(torch.nn.Module):
         self,
         vocab_size: int,
         encoder: Emformer,
-        # decoder: TransformerDecoder,
         ctc: CTC,
         predictor: Predictor,
         joint_network: JointNetwork,
         ctc_weight: float = 0.5,
         ignore_id: int = IGNORE_ID,
         reverse_weight: float = 0.0,
-        lsm_weight: float = 0.0,
-        length_normalized_loss: bool = False,
     ):
         super().__init__()
         # note that eos is the same as sos (equivalent ID)
@@ -47,15 +41,8 @@ class StreamASRModel(torch.nn.Module):
         self.reverse_weight = reverse_weight
 
         self.encoder = encoder
-        # self.decoder = decoder
         self.ctc = ctc
 
-        self.criterion_att = LabelSmoothingLoss(
-            size=vocab_size,
-            padding_idx=ignore_id,
-            smoothing=lsm_weight,
-            normalize_length=length_normalized_loss,
-        )
         self.predictor = predictor
         self.joint_network = joint_network
         self.transducer_loss = RNNTLoss(
@@ -86,66 +73,26 @@ class StreamASRModel(torch.nn.Module):
         assert (speech.shape[0] == speech_lengths.shape[0] == text.shape[0] ==
                 text_lengths.shape[0]), (speech.shape, speech_lengths.shape,
                                          text.shape, text_lengths.shape)
-        encoder_chunk_out, encoder_out_lens = self.encoder(speech, speech_lengths, warmup=warmup)
-        encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_chunk_out.size(1)).unsqueeze(1) 
+        encoder_out, encoder_out_lens = self.encoder(speech, speech_lengths, warmup=warmup)
+        encoder_mask = ~make_pad_mask(encoder_out_lens, encoder_out.size(1)).unsqueeze(1) 
 
         # ctc
-        # loss_ctc = self.ctc(encoder_chunk_out, encoder_out_lens, text, text_lengths)
-
-        
-        # 2a. Attention-decoder branch
-        # if self.ctc_weight != 1.0:
-        #     loss_att = self._calc_att_loss(encoder_chunk_out, encoder_mask,
-        #                                             text, text_lengths)
-        # else:
-        #     loss_att = None
+        loss_ctc = self.ctc(encoder_out, encoder_out_lens, text, text_lengths)
 
         # transducer
         predict_ys_in_pad, target, target_len = prepare_loss_inputs(text, encoder_mask)
         predictor_out = self.predictor(predict_ys_in_pad)
-        h_enc = encoder_chunk_out.unsqueeze(2)
+        h_enc = encoder_out.unsqueeze(2)
         h_dec = predictor_out.unsqueeze(1)
         joint_out = self.joint_network(h_enc, h_dec)
         target = target.to(dtype=torch.int32)
         encoder_out_lens = encoder_out_lens.to(dtype=torch.int32)
-        loss_trans = rnnt_loss(joint_out, target, encoder_out_lens, target_len,
-                                blank=self.blank_id, reduction="mean")
-        # loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
+        loss_trans = self.transducer_loss(joint_out, target, encoder_out_lens, target_len)
 
+        loss = loss_ctc * self.ctc_weight * loss_trans * (1 - self.ctc_weight)
 
-        loss = loss_trans
+        return loss, None, loss_ctc, loss_trans
 
-        return loss, None, None, loss_trans
-
-    def _calc_att_loss(
-        self,
-        encoder_out: torch.Tensor,
-        encoder_mask: torch.Tensor,
-        ys_pad: torch.Tensor,
-        ys_pad_lens: torch.Tensor,
-    ) -> torch.Tensor:
-        ys_in_pad, ys_out_pad = add_sos_eos(ys_pad, self.sos, self.eos,
-                                            self.ignore_id)
-        ys_in_lens = ys_pad_lens + 1
-
-        # reverse the seq, used for right to left decoder
-        r_ys_pad = reverse_pad_list(ys_pad, ys_pad_lens, float(self.ignore_id))
-        r_ys_in_pad, r_ys_out_pad = add_sos_eos(r_ys_pad, self.sos, self.eos,
-                                                self.ignore_id)
-        # 1. Forward decoder
-        decoder_out, r_decoder_out, _ = self.decoder(encoder_out, encoder_mask,
-                                                     ys_in_pad, ys_in_lens,
-                                                     r_ys_in_pad,
-                                                     self.reverse_weight)
-        # 2. Compute attention loss
-        loss_att = self.criterion_att(decoder_out, ys_out_pad)
-        r_loss_att = torch.tensor(0.0)
-        if self.reverse_weight > 0.0:
-            r_loss_att = self.criterion_att(r_decoder_out, r_ys_out_pad)
-        loss_att = loss_att * (
-            1 - self.reverse_weight) + r_loss_att * self.reverse_weight
-
-        return loss_att
 
     def ctc_greedy_search(
         self,
@@ -177,6 +124,70 @@ class StreamASRModel(torch.nn.Module):
         result = topk_index.tolist()
 
         return [remove_duplicates_and_blank(result)]
+
+
+    def trans_greedy_search(
+        self,
+        speech: torch.Tensor,
+        speech_lengths: torch.Tensor,
+        device: torch.device,
+        params: Dict,
+    ) -> List[List[int]]:
+        """ Apply CTC greedy search
+
+        Args:
+            speech (torch.Tensor): (batch, max_len, feat_dim)
+            speech_length (torch.Tensor): (batch, )
+        Returns:
+            List[List[int]]: best path result
+        """
+        assert speech.shape[0] == speech_lengths.shape[0] == 1
+        speech_lengths += params['right_context_length']
+        context_size = 2
+
+        speech = torch.nn.functional.pad(
+            speech,
+            pad=(0, 0, 0, params['right_context_length']),
+            value=LOG_EPS,
+        )
+        encoder_out, encoder_out_lens = self.encoder(x=speech, x_lens=speech_lengths)
+        
+        decoder_input = torch.tensor([self.blank_id] * context_size, device=device, dtype=torch.int64).reshape(1, context_size)
+        decoder_out = self.predictor(decoder_input, need_pad=False)
+
+        T = encoder_out.size(1)
+        hyp = [self.blank_id] * context_size
+        t = 0
+        max_sym_per_frame = 5
+        # Maximum symbols per utterance.
+        max_sym_per_utt = 1000
+
+        # symbols per frame
+        sym_per_frame = 0
+
+        # symbols per utterance decoded so far
+        sym_per_utt = 0
+
+        while t < T and sym_per_utt < max_sym_per_utt:
+            if sym_per_frame >= max_sym_per_frame:
+                sym_per_frame = 0
+                t += 1
+                continue
+            current_encoder_out = encoder_out[:, t:t+1, :].unsqueeze(2)
+            logits = self.joint_network(current_encoder_out, decoder_out.unsqueeze(1))
+            y = logits.argmax().item()
+            if y != self.blank_id:
+                hyp.append(y)
+                decoder_input = torch.tensor([hyp[-context_size:]], device=device).reshape(1, context_size)
+                decoder_out = self.predictor(decoder_input, need_pad=False)
+                sym_per_utt += 1
+                sym_per_frame += 1
+            else:
+                sym_per_frame = 0
+                t += 1
+
+        hyp = hyp[context_size:]
+        return [hyp]
 
 
     def streaming_ctc_greedy_search(
@@ -326,98 +337,13 @@ class StreamASRModel(torch.nn.Module):
         return hyps, encoder_out
 
 
-    def attention_rescoring(
-        self,
-        speech: torch.Tensor,
-        speech_lengths: torch.Tensor,
-        beam_size: int,
-        device: torch.device,
-        params: Dict,
-        ctc_weight: float = 0.0,
-    ) -> List[int]:
-        """ Apply attention rescoring decoding, CTC prefix beam search
-            is applied first to get nbest, then we resoring the nbest on
-            attention decoder with corresponding encoder out
-
-        Args:
-            speech (torch.Tensor): (batch, max_len, feat_dim)
-            speech_length (torch.Tensor): (batch, )
-            beam_size (int): beam size for beam search
-            decoding_chunk_size (int): decoding chunk for dynamic chunk
-                trained model.
-                <0: for decoding, use full chunk.
-                >0: for decoding, use fixed chunk size as set.
-                0: used for training, it's prohibited here
-            simulate_streaming (bool): whether do encoder forward in a
-                streaming fashion
-            reverse_weight (float): right to left decoder weight
-            ctc_weight (float): ctc score weight
-
-        Returns:
-            List[int]: Attention rescoring result
-        """
-        assert speech.shape[0] == speech_lengths.shape[0] == 1
-
-        # encoder_out: (1, maxlen, encoder_dim), len(hyps) = beam_size
-        hyps, encoder_out = self._ctc_prefix_beam_search(
-            speech, speech_lengths, beam_size, device, params)
-
-        assert len(hyps) == beam_size
-        hyps_pad = pad_sequence([
-            torch.tensor(hyp[0], device=device, dtype=torch.long)
-            for hyp in hyps
-        ], True, self.ignore_id)  # (beam_size, max_hyps_len)
-        ori_hyps_pad = hyps_pad
-        hyps_lens = torch.tensor([len(hyp[0]) for hyp in hyps],
-                                 device=device,
-                                 dtype=torch.long)  # (beam_size,)
-        hyps_pad, _ = add_sos_eos(hyps_pad, self.sos, self.eos, self.ignore_id)
-        hyps_lens = hyps_lens + 1  # Add <sos> at begining
-        encoder_out = encoder_out.repeat(beam_size, 1, 1)
-        encoder_mask = torch.ones(beam_size,
-                                  1,
-                                  encoder_out.size(1),
-                                  dtype=torch.bool,
-                                  device=device)
-
-        decoder_out, _ = self.decoder(encoder_out, encoder_mask, hyps_pad, hyps_lens)  
-        # (beam_size, max_hyps_len, vocab_size)
-        decoder_out = torch.nn.functional.log_softmax(decoder_out, dim=-1)
-        decoder_out = decoder_out.cpu().numpy()
-
-        # Only use decoder score for rescoring
-        best_score = -float('inf')
-        best_index = 0
-        for i, hyp in enumerate(hyps):
-            score = 0.0
-            for j, w in enumerate(hyp[0]):
-                score += decoder_out[i][j][w]
-            score += decoder_out[i][len(hyp[0])][self.eos]
-
-            # add ctc score
-            score += hyp[1] * ctc_weight
-            if score > best_score:
-                best_score = score
-                best_index = i
-        return hyps[best_index][0], best_score
-
-
-
-
 
 def init_stream_asr_model(configs):
     input_dim = configs['input_dim']
     vocab_size = configs['output_dim']
     encoder_dim = configs['encoder_conf']['d_model']
-    decoder_type = configs.get('decoder', 'bitransformer')
     
     encoder = Emformer(num_features=input_dim, **configs['encoder_conf'])
-    if decoder_type == 'transformer':
-        decoder = TransformerDecoder(vocab_size, encoder_dim, **configs['decoder_conf'])
-    else:
-        assert 0.0 < configs['model_conf']['reverse_weight'] < 1.0
-        assert configs['decoder_conf']['r_num_blocks'] > 0
-        decoder = BiTransformerDecoder(vocab_size, encoder_dim, **configs['decoder_conf'])
     ctc = CTC(vocab_size, encoder_output_size=encoder_dim)
     
     predictor_dim = configs['predictor_conf']['predictor_dim']

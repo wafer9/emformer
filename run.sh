@@ -11,7 +11,7 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
 # export NCCL_SOCKET_IFNAME=ens4f1
 export NCCL_DEBUG=INFO
-stage=4 # start from 0 if you need to start from data preparation
+stage=1 # start from 0 if you need to start from data preparation
 stop_stage=4
 
 # The num of machines(nodes) for multi-machine training, 1 is for one machine.
@@ -43,16 +43,16 @@ train_set=train
 # 4. conf/train_unified_transformer.yaml: Unified dynamic chunk transformer
 # 5. conf/train_u2++_conformer.yaml: U2++ conformer
 # 6. conf/train_u2++_transformer.yaml: U2++ transformer
-train_config=conf/train_emformer_rnnt++.yaml
+train_config=conf/train_emformer_cnn.yaml
 cmvn=true
-dir=exp/emformer_rnnt
+dir=exp/emformer
 checkpoint=
 
 # use average_checkpoint will get better result
 average_checkpoint=true
 decode_checkpoint=$dir/final.pt
 average_num=30
-decode_modes="ctc_greedy_search ctc_prefix_beam_search attention attention_rescoring"
+decode_modes="ctc_greedy_search ctc_prefix_beam_search"
 
 . tools/parse_options.sh || exit 1;
 

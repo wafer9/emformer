@@ -23,6 +23,12 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+def is_jit_tracing():
+    if torch.jit.is_scripting():
+        return False
+    elif torch.jit.is_tracing():
+        return True
+    return False
 
 def _ntuple(n):
     def parse(x):
@@ -410,7 +416,7 @@ class ActivationBalancer(torch.nn.Module):
         self.max_abs = max_abs
 
     def forward(self, x: Tensor) -> Tensor:
-        if torch.jit.is_scripting():
+        if torch.jit.is_scripting() or is_jit_tracing():
             return x
 
         return ActivationBalancerFunction.apply(
@@ -459,7 +465,7 @@ class DoubleSwish(torch.nn.Module):
         """Return double-swish activation function which is an approximation to Swish(Swish(x)),
         that we approximate closely with x * sigmoid(x-1).
         """
-        if torch.jit.is_scripting():
+        if torch.jit.is_scripting() or is_jit_tracing():
             return x * torch.sigmoid(x - 1.0)
         return DoubleSwishFunction.apply(x)
 
