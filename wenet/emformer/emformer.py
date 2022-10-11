@@ -31,7 +31,6 @@ from wenet.emformer.scaling import (
     ScaledConv2d,
     ScaledLinear,
 )
-from wenet.emformer.sincnet import SincConv_fast
 
 # from wenet.utils.mask import make_pad_mask
 LOG_EPSILON = math.log(1e-10)
