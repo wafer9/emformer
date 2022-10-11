@@ -157,11 +157,7 @@ def main():
 
     test_data_loader = DataLoader(test_dataset, batch_size=None, num_workers=0)
 
-    if configs['stream']:
-        model = init_stream_asr_model(configs)
-    else:
-        model = init_asr_model(configs)
-
+    model = init_stream_asr_model(configs)
 
     # Load dict
     char_dict = {v: k for k, v in symbol_table.items()}
