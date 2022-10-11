@@ -25,7 +25,6 @@ import yaml
 from torch.utils.data import DataLoader
 
 from wenet.dataset.dataset import Dataset
-from wenet.transformer.asr_model import init_asr_model
 from wenet.emformer.asr_model import init_stream_asr_model
 from wenet.utils.checkpoint import load_checkpoint
 from wenet.utils.file_utils import read_symbol_table, read_non_lang_symbols

@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple, Dict
 
 import torch
 
-from wenet.transformer.ctc import CTC
+from wenet.emformer.ctc import CTC
 from wenet.emformer.emformer import Emformer
 
 from wenet.utils.common import IGNORE_ID, LOG_EPS, add_sos_eos, log_add
