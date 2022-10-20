@@ -38,6 +38,12 @@ class Executor:
         else:
             model_context = nullcontext
         num_seen_utts = 0
+        # if rank == 0:
+        #     prof = torch.profiler.profile(
+        #     schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./tensorboard/resnet19'),
+        #     record_shapes=True, with_stack=True)
+        #     prof.start()
         with model_context():
             for batch_idx, batch in enumerate(data_loader):
                 key, feats, target, feats_lengths, target_lengths = batch
@@ -109,6 +115,10 @@ class Executor:
                         log_str += 'loss_trans {:.6f} '.format(loss_trans.item())
                     log_str += 'lr {:.8f} rank {}'.format(lr, rank)
                     logging.debug(log_str)
+        #         if rank == 0:
+        #             prof.step()
+        # if rank == 0:
+        #     prof.stop()
 
     def cv(self, model, data_loader, device, args):
         ''' Cross validation on

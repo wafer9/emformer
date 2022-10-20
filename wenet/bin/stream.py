@@ -73,33 +73,20 @@ class Stream(object):
 
 
     def init_states(self, params: Dict) -> None:
-        attn_caches = [
-            [
-                torch.zeros(
-                    params['memory_size'], params['encoder_dim'], device=self.device
-                ),
-                torch.zeros(
+        memory_caches = torch.zeros(params['num_encoder_layers'], 
+                    params['memory_size'], 1, params['encoder_dim'], device=self.device)
+
+        left_key_caches = torch.zeros(params['num_encoder_layers'], 
                     params['left_context_length'] // params['subsampling_factor'],
-                    params['encoder_dim'],
-                    device=self.device,
-                ),
-                torch.zeros(
+                    1, params['encoder_dim'], device=self.device)
+        left_val_caches = torch.zeros(params['num_encoder_layers'], 
                     params['left_context_length'] // params['subsampling_factor'],
-                    params['encoder_dim'],
-                    device=self.device,
-                ),
-            ]
-            for _ in range(params['num_encoder_layers'])
-        ]
-        conv_caches = [
-            torch.zeros(
-                params['encoder_dim'],
-                params['cnn_module_kernel'] - 1,
-                device=self.device,
-            )
-            for _ in range(params['num_encoder_layers'])
-        ]
-        self.states = (attn_caches, conv_caches)
+                    1, params['encoder_dim'], device=self.device)
+        conv_caches = torch.zeros(params['num_encoder_layers'], 1,
+                     params['encoder_dim'], params['cnn_module_kernel'] - 1,
+                    device=self.device)
+
+        self.states = (memory_caches, left_key_caches, left_val_caches, conv_caches)
 
     def get_feature_chunk(self) -> torch.Tensor:
         """Get a chunk of feature frames.

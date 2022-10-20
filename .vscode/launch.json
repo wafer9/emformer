@@ -5,24 +5,16 @@
             "name": "asr",
             "type": "python",
             "request": "launch",
-            "program": "wenet/bin/train.py",
-            "env": {"PYTHONPATH": "/data/joe/asr/e2e/emformer",
+            "program": "wenet/bin/recognize_onnx.py",
+            "env": {"PYTHONPATH": "/data/asr/wangzhou/asr/e2e/emformer",
                     "CUDA_VISIBLE_DEVICES": "0"},
             "console": "integratedTerminal",
-            "cwd": "/data/joe/asr/e2e/emformer",
+            "cwd": "/data/asr/wangzhou/asr/e2e/emformer",
             "args": 
-               ["--gpu", "0",
-                "--config", "conf/train_emformer_cnn.yaml",
-                "--train_data", "data/train/data.list",
-                "--cv_data", "data/dev/data.list",
-                "--data_type", "raw",
-                "--symbol_table", "data/dict/lang_char.txt",
-                "--model_dir", "exp/emformer_sinc",
-                "--ddp.init_method","file:///data/joe/asr/e2e/emformer/exp/emformer_sinc/ddp_init",
-                "--ddp.world_size", "1",
-                "--ddp.rank", "0",
-                "--ddp.dist_backend", "gloo",
-                "--num_workers", "1"
+               [
+                "--config", "exp/emformer/train.yaml",
+                "--checkpoint", "exp/emformer/299.pt",
+                "--output_dir", "exp/emformer/onnx"
                ]
         }
     ]

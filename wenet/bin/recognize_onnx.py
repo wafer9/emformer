@@ -1,277 +1,181 @@
-# Copyright (c) 2020 Mobvoi Inc. (authors: Binbin Zhang, Xiaoyu Chen, Di Wu)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#!/usr/bin/env python3
 
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""
-This script is for testing exported onnx encoder and decoder.
-The exported onnx models only support batch offline ASR inference.
-It requires a python wrapped c++ ctc decoder.
-Please install it by following:
-https://github.com/Slyne/ctc_decoder.git
-"""
 from __future__ import print_function
 
 import argparse
-import copy
-import logging
 import os
+import copy
 import sys
 
 import torch
 import yaml
-from torch.utils.data import DataLoader
-
-from wenet.dataset.dataset import Dataset
-from wenet.utils.common import IGNORE_ID
-from wenet.utils.file_utils import read_symbol_table
-from wenet.utils.config import override_config
-
-import onnxruntime as rt
-import multiprocessing
 import numpy as np
+import torchaudio
 
-try:
-    from swig_decoders import map_batch, \
-        ctc_beam_search_decoder_batch, \
-        TrieVector, PathTrie
-except ImportError:
-    print('Please install ctc decoders first by refering to\n' +
-          'https://github.com/Slyne/ctc_decoder.git')
-    sys.exit(1)
+from wenet.emformer.asr_model import init_stream_asr_model
+from wenet.utils.checkpoint import load_checkpoint
+from wenet.bin.stream import Stream, stack_states, unstack_states
+from wenet.emformer.scaling_converter import convert_scaled_to_non_scaled
+from typing import List, Optional, Tuple
+from wenet.emformer.ctc import CTC
+from wenet.emformer.emformer import Emformer
+import torch.nn.functional as F
+from wenet.utils.common import IGNORE_ID, LOG_EPS, add_sos_eos, log_add
 
+import onnx
+import onnxruntime
+from onnxruntime.quantization import quantize_dynamic, QuantType
 
 def get_args():
-    parser = argparse.ArgumentParser(description='recognize with your model')
+    parser = argparse.ArgumentParser(description='export your script model')
     parser.add_argument('--config', required=True, help='config file')
-    parser.add_argument('--test_data', required=True, help='test data file')
-    parser.add_argument('--data_type',
-                        default='raw',
-                        choices=['raw', 'shard'],
-                        help='train and cv data type')
-    parser.add_argument('--gpu',
-                        type=int,
-                        default=-1,
-                        help='gpu id for this rank, -1 for cpu')
-    parser.add_argument('--dict', required=True, help='dict file')
-    parser.add_argument('--encoder_onnx', required=True, help='encoder onnx file')
-    parser.add_argument('--decoder_onnx', required=True, help='decoder onnx file')
-    parser.add_argument('--result_file', required=True, help='asr result file')
-    parser.add_argument('--batch_size',
-                        type=int,
-                        default=32,
-                        help='asr result file')
-    parser.add_argument('--mode',
-                        choices=[
-                            'ctc_greedy_search', 'ctc_prefix_beam_search',
-                            'attention_rescoring'],
-                        default='attention_rescoring',
-                        help='decoding mode')
-    parser.add_argument('--bpe_model',
-                        default=None,
-                        type=str,
-                        help='bpe model for english part')
-    parser.add_argument('--override_config',
-                        action='append',
-                        default=[],
-                        help="override yaml config")
-    parser.add_argument('--fp16',
-                        action='store_true',
-                        help='whether to export fp16 model, default false')
+    parser.add_argument('--checkpoint', required=True, help='checkpoint model')
+    parser.add_argument('--output_dir', required=True, help='output directory')
     args = parser.parse_args()
-    print(args)
     return args
 
 
+def to_numpy(tensor):
+    if tensor.requires_grad:
+        return tensor.detach().cpu().numpy()
+    else:
+        return tensor.cpu().numpy()
+
+
+class EncoderCtc(torch.nn.Module):
+    def __init__(self,
+                 encoder: Emformer,
+                 ctc: CTC):
+        super().__init__()
+        self.encoder = encoder
+        self.ctc = ctc
+
+    def forward(self, 
+            x: torch.Tensor,
+            x_lens: torch.Tensor,
+            num_processed_frames: torch.Tensor,
+            memory_caches: torch.Tensor,
+            left_key_caches: torch.Tensor,
+            left_val_caches: torch.Tensor,
+            conv_caches: torch.Tensor,
+    ) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, 
+        torch.Tensor, torch.Tensor, torch.Tensor,
+    ]:
+        """
+        B: batch size;
+        D: feature dimension;
+        T: length of utterance.
+        Args:
+          x (torch.Tensor): (B, T, D).
+          x_lens (torch.Tensor): (B,)
+          num_processed_frames: (1,)
+          memory_caches: (num_encoder_layers, memory_size, d_model)
+          left_key_caches: (num_encoder_layers, left_context_length, d_model)
+          left_val_caches: (num_encoder_layers, left_context_length, d_model)
+          conv_caches: (num_encoder_layers, d_model, cnn_module_kernel - 1)
+        Returns:
+          ctc_log_probs:
+          output_lengths:
+          out_memory_caches:
+          out_left_key_caches:
+          out_left_val_caches:
+          output_conv_caches:
+        """
+        (
+            output, 
+            output_lengths,
+            out_memory_caches, 
+            out_left_key_caches, 
+            out_left_val_caches, 
+            output_conv_caches
+        ) = self.encoder.infer(
+            x=x,
+            x_lens=x_lens,
+            num_processed_frames=num_processed_frames,
+            memory_caches = memory_caches,
+            left_key_caches=left_key_caches,
+            left_val_caches=left_val_caches,
+            conv_caches=conv_caches
+        )
+        ctc_log_probs = self.ctc.log_softmax(output)
+
+        return ctc_log_probs, output_lengths, out_memory_caches, \
+               out_left_key_caches, out_left_val_caches, output_conv_caches
+
 def main():
+    torch.manual_seed(777)
     args = get_args()
-    logging.basicConfig(level=logging.DEBUG,
-                        format='%(asctime)s %(levelname)s %(message)s')
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    output_dir = args.output_dir
+    os.system("mkdir -p " + output_dir)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    device = torch.device('cpu')
 
     with open(args.config, 'r') as fin:
         configs = yaml.load(fin, Loader=yaml.FullLoader)
-    if len(args.override_config) > 0:
-        configs = override_config(configs, args.override_config)
+    params = copy.deepcopy(configs['encoder_conf'])
+    params['encoder_dim'] = configs['encoder_conf']['d_model']
+    params['output_dim'] = configs['output_dim']
 
-    reverse_weight = configs["model_conf"].get("reverse_weight", 0.0)
-    symbol_table = read_symbol_table(args.dict)
-    test_conf = copy.deepcopy(configs['dataset_conf'])
-    test_conf['filter_conf']['max_length'] = 102400
-    test_conf['filter_conf']['min_length'] = 0
-    test_conf['filter_conf']['token_max_length'] = 102400
-    test_conf['filter_conf']['token_min_length'] = 0
-    test_conf['filter_conf']['max_output_input_ratio'] = 102400
-    test_conf['filter_conf']['min_output_input_ratio'] = 0
-    test_conf['speed_perturb'] = False
-    test_conf['spec_aug'] = False
-    test_conf['shuffle'] = False
-    test_conf['sort'] = False
-    test_conf['fbank_conf']['dither'] = 0.0
-    test_conf['batch_conf']['batch_type'] = "static"
-    test_conf['batch_conf']['batch_size'] = args.batch_size
+    encoder_outpath = os.path.join(output_dir, 'emformer.quant.onnx')
+    ort_session = onnxruntime.InferenceSession(encoder_outpath)
 
-    test_dataset = Dataset(args.data_type,
-                           args.test_data,
-                           symbol_table,
-                           test_conf,
-                           args.bpe_model,
-                           partition=False)
+    audio = '/netdisk1/wangzhou/data/aishell_set//data_aishell/wav/test/S0764/BAC009S0764W0121.wav'
+    waveform, sr = torchaudio.load(audio, frame_offset=0 , num_frames=-1, normalize=True, channels_first=True)
+    assert sr == 16000
+    waveform = waveform * (1 << 15)
+    kaldi_feat = torchaudio.compliance.kaldi.fbank(
+                waveform,
+                num_mel_bins=80,
+                frame_length=25,
+                frame_shift=10,
+                dither=False,
+                energy_floor=0.0,
+                sample_frequency=16000)
 
-    test_data_loader = DataLoader(test_dataset, batch_size=None, num_workers=0)
 
-    # Init asr model from configs
-    use_cuda = args.gpu >= 0 and torch.cuda.is_available()
-    if use_cuda:
-        EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    else:
-        EP_list = ['CPUExecutionProvider']
+    stream = Stream(params=params)
+    stream.set_feature(kaldi_feat)
+    tail_length = 3 * params['subsampling_factor'] + params['right_context_length'] + 3
+    memory_caches, left_key_caches, left_val_caches, conv_caches = stream.states
+    memory_caches = to_numpy(memory_caches)
+    left_key_caches = to_numpy(left_key_caches)
+    left_val_caches = to_numpy(left_val_caches)
+    conv_caches = to_numpy(conv_caches)
 
-    encoder_ort_session = rt.InferenceSession(args.encoder_onnx, providers=EP_list)
-    decoder_ort_session = None
-    if args.mode == "attention_rescoring":
-        decoder_ort_session = rt.InferenceSession(args.decoder_onnx, providers=EP_list)
+    result = []
+    while not stream.done:
+        num_processed_frames = torch.tensor(stream.num_processed_frames, device=device).unsqueeze(0)
+        x = stream.get_feature_chunk().unsqueeze(0) # (1, chunk, 80)
+        x_lens = torch.tensor(x.size(1), device=device).unsqueeze(0)
+        if x.size(1) < tail_length:
+            pad_length = tail_length - x.size(1)
+            x_lens += pad_length
+            x = F.pad(x, (0, 0, 0, pad_length), mode="constant", value=LOG_EPS)
+        x = to_numpy(x)
+        x_lens = to_numpy(x_lens)
+        num_processed_frames = to_numpy(num_processed_frames)
 
-    # Load dict
-    vocabulary = []
-    char_dict = {}
-    with open(args.dict, 'r') as fin:
-        for line in fin:
-            arr = line.strip().split()
-            assert len(arr) == 2
-            char_dict[int(arr[1])] = arr[0]
-            vocabulary.append(arr[0])
-    eos = sos = len(char_dict) - 1
-    with torch.no_grad(), open(args.result_file, 'w') as fout:
-        for _, batch in enumerate(test_data_loader):
-            keys, feats, _, feats_lengths, _ = batch
-            feats, feats_lengths = feats.numpy(), feats_lengths.numpy()
-            if args.fp16:
-                feats = feats.astype(np.float16)
-            ort_inputs = {
-                encoder_ort_session.get_inputs()[0].name: feats,
-                encoder_ort_session.get_inputs()[1].name: feats_lengths}
-            ort_outs = encoder_ort_session.run(None, ort_inputs)
-            encoder_out, encoder_out_lens, ctc_log_probs, \
-                beam_log_probs, beam_log_probs_idx = ort_outs
-            beam_size = beam_log_probs.shape[-1]
-            batch_size = beam_log_probs.shape[0]
-            num_processes = min(multiprocessing.cpu_count(), batch_size)
-            if args.mode == 'ctc_greedy_search':
-                if beam_size != 1:
-                    log_probs_idx = beam_log_probs_idx[:, :, 0]
-                batch_sents = []
-                for idx, seq in enumerate(log_probs_idx):
-                    batch_sents.append(seq[0:encoder_out_lens[idx]].tolist())
-                hyps = map_batch(batch_sents, vocabulary, num_processes,
-                                 True, 0)
-            elif args.mode in ('ctc_prefix_beam_search', "attention_rescoring"):
-                batch_log_probs_seq_list = beam_log_probs.tolist()
-                batch_log_probs_idx_list = beam_log_probs_idx.tolist()
-                batch_len_list = encoder_out_lens.tolist()
-                batch_log_probs_seq = []
-                batch_log_probs_ids = []
-                batch_start = []  # only effective in streaming deployment
-                batch_root = TrieVector()
-                root_dict = {}
-                for i in range(len(batch_len_list)):
-                    num_sent = batch_len_list[i]
-                    batch_log_probs_seq.append(
-                        batch_log_probs_seq_list[i][0:num_sent])
-                    batch_log_probs_ids.append(
-                        batch_log_probs_idx_list[i][0:num_sent])
-                    root_dict[i] = PathTrie()
-                    batch_root.append(root_dict[i])
-                    batch_start.append(True)
-                score_hyps = ctc_beam_search_decoder_batch(batch_log_probs_seq,
-                                                           batch_log_probs_ids,
-                                                           batch_root,
-                                                           batch_start,
-                                                           beam_size,
-                                                           num_processes,
-                                                           0, -2, 0.99999)
-                if args.mode == 'ctc_prefix_beam_search':
-                    hyps = []
-                    for cand_hyps in score_hyps:
-                        hyps.append(cand_hyps[0][1])
-                    hyps = map_batch(hyps, vocabulary, num_processes, False, 0)
-            if args.mode == 'attention_rescoring':
-                ctc_score, all_hyps = [], []
-                max_len = 0
-                for hyps in score_hyps:
-                    cur_len = len(hyps)
-                    if len(hyps) < beam_size:
-                        hyps += (beam_size - cur_len) * [(-float("INF"), (0,))]
-                    cur_ctc_score = []
-                    for hyp in hyps:
-                        cur_ctc_score.append(hyp[0])
-                        all_hyps.append(list(hyp[1]))
-                        if len(hyp[1]) > max_len:
-                            max_len = len(hyp[1])
-                    ctc_score.append(cur_ctc_score)
-                if args.fp16:
-                    ctc_score = np.array(ctc_score, dtype=np.float16)
-                else:
-                    ctc_score = np.array(ctc_score, dtype=np.float32)
-                hyps_pad_sos_eos = np.ones(
-                    (batch_size, beam_size, max_len + 2), dtype=np.int64) * IGNORE_ID
-                r_hyps_pad_sos_eos = np.ones(
-                    (batch_size, beam_size, max_len + 2), dtype=np.int64) * IGNORE_ID
-                hyps_lens_sos = np.ones((batch_size, beam_size), dtype=np.int32)
-                k = 0
-                for i in range(batch_size):
-                    for j in range(beam_size):
-                        cand = all_hyps[k]
-                        l = len(cand) + 2
-                        hyps_pad_sos_eos[i][j][0:l] = [sos] + cand + [eos]
-                        r_hyps_pad_sos_eos[i][j][0:l] = [sos] + cand[::-1] + [eos]
-                        hyps_lens_sos[i][j] = len(cand) + 1
-                        k += 1
-                decoder_ort_inputs = {
-                    decoder_ort_session.get_inputs()[0].name: encoder_out,
-                    decoder_ort_session.get_inputs()[1].name: encoder_out_lens,
-                    decoder_ort_session.get_inputs()[2].name: hyps_pad_sos_eos,
-                    decoder_ort_session.get_inputs()[3].name: hyps_lens_sos,
-                    decoder_ort_session.get_inputs()[-1].name: ctc_score}
-                if reverse_weight > 0:
-                    r_hyps_pad_sos_eos_name = decoder_ort_session.get_inputs()[4].name
-                    decoder_ort_inputs[r_hyps_pad_sos_eos_name] = r_hyps_pad_sos_eos
-                best_index = decoder_ort_session.run(None, decoder_ort_inputs)[0]
-                best_sents = []
-                k = 0
-                for idx in best_index:
-                    cur_best_sent = all_hyps[k: k + beam_size][idx]
-                    best_sents.append(cur_best_sent)
-                    k += beam_size
-                hyps = map_batch(best_sents, vocabulary, num_processes)
+        ort_inputs = {
+            'x': x,
+            'x_lens': (x_lens),
+            'num_processed_frames': (num_processed_frames),
+            'memory_caches': (memory_caches),
+            'left_key_caches': (left_key_caches),
+            'left_val_caches': (left_val_caches),
+            'conv_caches': (conv_caches)
+        }
 
-            for i, key in enumerate(keys):
-                content = hyps[i]
-                logging.info('{} {}'.format(key, content))
-                fout.write('{} {}\n'.format(key, content))
+        onnx_output = ort_session.run(None, ort_inputs)
+        output, _, memory_caches, left_key_caches, left_val_caches, conv_caches = onnx_output
+
+        topk_prob, topk_index = torch.tensor(output).topk(1, dim=2)  # (B, maxlen, 1)
+        topk_index = topk_index[0].view(-1)  # (B, maxlen)
+        result += topk_index.tolist()
+        end = 1
+
+    print(result)
+
 
 if __name__ == '__main__':
     main()
