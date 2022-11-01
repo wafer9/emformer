@@ -118,10 +118,9 @@ def main():
     load_checkpoint(model, args.checkpoint)
     encoder_outpath = os.path.join(output_dir, 'emformer.onnx')
 
-    model.eval()
     encoder = convert_scaled_to_non_scaled(model.encoder, inplace=True)
     encoder_ctc = EncoderCtc(encoder, model.ctc)
-
+    encoder_ctc.eval()
 
     speech = torch.randn(1, 100, 80)
     stream = Stream(params=params)
@@ -156,7 +155,7 @@ def main():
         memory_caches, left_key_caches, left_val_caches, conv_caches),
         encoder_outpath,
         verbose=False,
-        opset_version=13,
+        opset_version=12,
         input_names=["x", 
                     "x_lens", 
                     "num_processed_frames",
@@ -172,6 +171,23 @@ def main():
                     "output_conv_caches"],
         dynamic_axes={'x': {1: 'T'}, 'output': {1: 'T_OUT'}},
     )
+
+    encoder_ctc = onnx.load(encoder_outpath)
+    params_ = {'subsampling_rate': params['subsampling_factor'],
+                'encoder_layer_num': params['num_encoder_layers'],
+                'encoder_dimention': params['encoder_dim'],
+                'cnn_kernel_size': params['cnn_module_kernel'],
+                'memory_size': params['memory_size'],
+                'chunk_length':params['chunk_length'],
+                'left_context_length':params['left_context_length'],
+                'right_context_length':params['right_context_length'],
+                'subsample_right_context_': 5}
+    for (k, v) in params_.items():
+        meta = encoder_ctc.metadata_props.add()
+        meta.key, meta.value = str(k), str(v)
+    onnx.checker.check_model(encoder_ctc)
+    onnx.helper.printable_graph(encoder_ctc.graph)
+    onnx.save(encoder_ctc, encoder_outpath)
 
 
     ort_session = onnxruntime.InferenceSession(encoder_outpath)
